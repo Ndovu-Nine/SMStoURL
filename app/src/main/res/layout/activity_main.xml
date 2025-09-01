@@ -1,0 +1,22 @@
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="24dp">
+
+    <Button
+        android:id="@+id/btnStartService"
+        android:layout_width="366dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="100dp"
+        android:text="Start SMS Forwarder" />
+
+    <Button
+        android:id="@+id/btnSettings"
+        android:layout_width="365dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:text="Settings" />
+
+</LinearLayout>
+
