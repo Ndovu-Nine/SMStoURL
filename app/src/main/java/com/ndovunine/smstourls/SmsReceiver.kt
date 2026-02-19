@@ -15,10 +15,12 @@ class SmsReceiver : BroadcastReceiver() {
             for (pdu in pdus) {
                 val sms = SmsMessage.createFromPdu(pdu as ByteArray)
                 val messageBody = sms.messageBody
+                val sender = sms.originatingAddress ?: "Unknown"
 
                 // Send SMS to foreground service
                 val serviceIntent = Intent(context, SmsForwardService::class.java).apply {
                     putExtra("sms_message", messageBody)
+                    putExtra("sms_sender", sender)
                 }
                 context.startService(serviceIntent)
             }

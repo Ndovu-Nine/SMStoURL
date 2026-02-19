@@ -35,7 +35,7 @@ class SmsForwardService : Service() {
     // Example: You can later load these from SharedPreferences
     private val urls = listOf(
         "http://yoururl:port/sms",
-        "https://fivayapi.ndovunine.com/api/transaction/addSMSTransaction"
+        "https://fivayapi.ndovunine.com/api/transaction/addSMS"
     )
 
     // Email is set by user in settings (later we’ll add UI)
@@ -68,6 +68,33 @@ class SmsForwardService : Service() {
 
 
     private var retryTimer: Timer? = null
+    private val NOTIF_ID = 1
+    private val channelId = "SmsForwarderChannel"
+
+    private var forwardedCount: Int
+        get() = prefs.getInt("forwarded_count", 0)
+        set(value) = prefs.edit().putInt("forwarded_count", value).apply()
+
+
+    private fun updateNotification() {
+        val notificationManager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+        val count = forwardedCount
+        val notification = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Notification.Builder(this, channelId)
+                .setContentTitle("SMS to URLs")
+                .setContentText("$count SMS forwarded")
+                .setSmallIcon(android.R.mipmap.sym_def_app_icon)
+                .build()
+        } else {
+            Notification.Builder(this)
+                .setContentTitle("SMS to URLs")
+                .setContentText("$count SMS forwarded")
+                .setSmallIcon(android.R.mipmap.sym_def_app_icon)
+                .setPriority(Notification.PRIORITY_LOW)
+                .build()
+        }
+        notificationManager.notify(NOTIF_ID, notification)
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -81,8 +108,9 @@ class SmsForwardService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         // Receive SMS message from intent
         val message = intent?.getStringExtra("sms_message")
+        val sender = intent?.getStringExtra("sms_sender") ?: "Unknown"
         if (!message.isNullOrBlank()) {
-            forwardMessage(message)
+            forwardMessage(message,sender)
         }
         return START_STICKY
     }
@@ -124,14 +152,14 @@ class SmsForwardService : Service() {
     }
 
 
-    private fun forwardMessage(message: String) {
+    private fun forwardMessage(message: String, sender: String = "Unknown") {
         val settings = getSharedPreferences("settings", Context.MODE_PRIVATE)
         val email = settings.getString("email", "") ?: ""
         val urls = settings.getString("urls", "") ?: ""
 
         if (urls.isEmpty()) return
 
-        val payload = mapOf("message" to message, "email" to email)
+        val payload = mapOf("message" to message,"sender" to sender, "email" to email)
         val json = gson.toJson(payload)
 
         val requestBody = RequestBody.create("application/json; charset=utf-8".toMediaType(), json)
@@ -143,12 +171,16 @@ class SmsForwardService : Service() {
             client.newCall(request).enqueue(object : Callback {
                 override fun onFailure(call: Call, e: IOException) {
                     e.printStackTrace()
-                    saveFailedMessage(message) // store for retry
+                    saveFailedMessage(message,sender) // store for retry
                 }
 
                 override fun onResponse(call: Call, response: Response) {
                     if (!response.isSuccessful) {
-                        saveFailedMessage(message)
+                        saveFailedMessage(message,sender)
+                    }
+                    else{
+                        forwardedCount += 1   // count up
+                        updateNotification()
                     }
                     response.close()
                 }
@@ -164,26 +196,33 @@ class SmsForwardService : Service() {
             prefs.edit().putString("failed_messages", gson.toJson(failed)).apply()
         }
     }
+    private fun saveFailedMessage(message: String, sender: String) {
+        val failed = loadFailedMessages().toMutableList()
+        val entry = gson.toJson(mapOf("message" to message, "sender" to sender))
+        if (!failed.contains(entry)) {
+            failed.add(entry)
+            prefs.edit().putString("failed_messages", gson.toJson(failed)).apply()
+        }
+    }
 
     /** Load failed list */
     private fun loadFailedMessages(): List<String> {
         val json = prefs.getString("failed_messages", "[]")
         return gson.fromJson(json, Array<String>::class.java).toList()
     }
+    private fun retryFailedMessages() {
+        val failed = loadFailedMessages().toMutableList()
+        for (entry in failed) {
+            val map = gson.fromJson(entry, Map::class.java)
+            forwardMessage(map["message"] as String, map["sender"] as? String ?: "Unknown")
+        }
+        prefs.edit().putString("failed_messages", "[]").apply()
+    }
 
     /** Retry loop every 30 minutes */
     private fun startRetryLoop() {
         retryTimer = fixedRateTimer("retry", true, 0L, 30 * 60 * 1000) {
-            val failed = loadFailedMessages().toMutableList()
-            if (failed.isNotEmpty()) {
-                for (msg in failed) {
-                    forwardMessage(msg)
-                    // on success, forwardMessage will NOT call saveFailedMessage again
-                }
-                // Clear after retry attempt (will be re-saved if still failing)
-                prefs.edit().putString("failed_messages", "[]").apply()
-            }
-
+            retryFailedMessages()
             // Also check inbox last 100 SMS
             syncLastInboxMessages()
         }
@@ -198,18 +237,18 @@ class SmsForwardService : Service() {
                 arrayOf("_id", "address", "body", "date"),
                 null,
                 null,
-                "date DESC LIMIT 100"
+                "date DESC LIMIT 5"
             )
 
             cursor?.use {
                 while (it.moveToNext()) {
                     val body = it.getString(it.getColumnIndexOrThrow("body"))
+                    val sender = it.getString(it.getColumnIndexOrThrow("address")) ?: "Unknown"  // ← add
                     val id = it.getLong(it.getColumnIndexOrThrow("_id"))
 
-                    val sentKey = "sent_$id"
-                    if (!prefs.getBoolean(sentKey, false)) {
-                        forwardMessage(body)
-                        prefs.edit().putBoolean(sentKey, true).apply()
+                    if (!prefs.getBoolean("sent_$id", false)) {
+                        forwardMessage(body, sender)  // ← pass sender
+                        prefs.edit().putBoolean("sent_$id", true).apply()
                     }
                 }
             }
