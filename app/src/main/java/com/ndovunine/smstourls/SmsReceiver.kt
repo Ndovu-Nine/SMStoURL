@@ -33,12 +33,12 @@ class SmsReceiver : BroadcastReceiver() {
                     //    This ONLY works when android:priority is high enough in the manifest.
                     //    May not work on all devices
                     abortBroadcast()
-
                     Log.i(TAG, "Broadcast aborted for spam message from [$sender]")
-
                     // 2. No need to forward — just return
                     return
                 }
+
+
 
                 // Send SMS to foreground service
                 val serviceIntent = Intent(context, SmsForwardService::class.java).apply {
