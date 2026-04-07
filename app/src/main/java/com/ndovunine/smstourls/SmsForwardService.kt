@@ -41,6 +41,12 @@ class SmsForwardService : Service() {
     // Email is set by user in settings (later we’ll add UI)
     private val email = "email@domain.com"
 
+    companion object {
+        const val ACTION_RETRY_MESSAGE = "com.ndovunine.smstourls.RETRY_MESSAGE"
+        const val ACTION_FAILED_UPDATED = "com.ndovunine.smstourls.FAILED_UPDATED"
+        const val EXTRA_RETRY_MESSAGE = "retry_message"
+    }
+
     private fun getUnsafeOkHttpClient(): OkHttpClient {
         return try {
             // Create a trust manager that does not validate certificate chains
@@ -105,7 +111,7 @@ class SmsForwardService : Service() {
         startRetryLoop()
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+    /*override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         // Receive SMS message from intent
         val message = intent?.getStringExtra("sms_message")
         val sender = intent?.getStringExtra("sms_sender") ?: "Unknown"
@@ -113,6 +119,38 @@ class SmsForwardService : Service() {
             forwardMessage(message,sender)
         }
         return START_STICKY
+    }*/
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        when (intent?.action) {
+            ACTION_RETRY_MESSAGE -> {
+                val message = intent.getStringExtra(EXTRA_RETRY_MESSAGE)
+                if (!message.isNullOrBlank()) {
+                    // Remove from failed list before retrying
+                    removeFailedMessage(message)
+                    forwardMessage(message)
+                }
+            }
+            else -> {
+                val message = intent?.getStringExtra("sms_message")
+                if (!message.isNullOrBlank()) {
+                    forwardMessage(message)
+                }
+            }
+        }
+        return START_STICKY
+    }
+
+    private fun removeFailedMessage(message: String) {
+        val failed = loadFailedMessages().toMutableList()
+        failed.remove(message)
+        prefs.edit().putString("failed_messages", gson.toJson(failed)).apply()
+        broadcastFailedUpdated()
+    }
+
+    private fun broadcastFailedUpdated() {
+        val intent = Intent(ACTION_FAILED_UPDATED)
+        sendBroadcast(intent)
     }
 
     @RequiresApi(Build.VERSION_CODES.O)
@@ -194,6 +232,7 @@ class SmsForwardService : Service() {
         if (!failed.contains(message)) {
             failed.add(message)
             prefs.edit().putString("failed_messages", gson.toJson(failed)).apply()
+            broadcastFailedUpdated()
         }
     }
     private fun saveFailedMessage(message: String, sender: String) {
@@ -204,6 +243,7 @@ class SmsForwardService : Service() {
             prefs.edit().putString("failed_messages", gson.toJson(failed)).apply()
         }
     }
+
 
     /** Load failed list */
     private fun loadFailedMessages(): List<String> {
