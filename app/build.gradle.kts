@@ -10,8 +10,8 @@ android {
 
     defaultConfig {
         applicationId = "com.ndovunine.smstourls"
-        minSdk = 21
-        targetSdk = 34
+        minSdk = 22
+        targetSdk = 35
         versionCode = 1
         versionName = "1.0"
 

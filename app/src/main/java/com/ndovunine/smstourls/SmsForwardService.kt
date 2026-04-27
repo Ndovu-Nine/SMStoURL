@@ -250,7 +250,7 @@ class SmsForwardService : Service() {
         val json = prefs.getString("failed_messages", "[]")
         return gson.fromJson(json, Array<String>::class.java).toList()
     }
-    private fun retryFailedMessages() {
+    private fun retryFailedMessages()  {
         val failed = loadFailedMessages().toMutableList()
         for (entry in failed) {
             val map = gson.fromJson(entry, Map::class.java)
@@ -277,7 +277,7 @@ class SmsForwardService : Service() {
                 arrayOf("_id", "address", "body", "date"),
                 null,
                 null,
-                "date DESC LIMIT 5"
+                "date DESC LIMIT 50"
             )
 
             cursor?.use {

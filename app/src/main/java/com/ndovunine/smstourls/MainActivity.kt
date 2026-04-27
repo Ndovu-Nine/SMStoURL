@@ -1,4 +1,4 @@
-package com.ndovunine.smstourls
+/*package com.ndovunine.smstourls
 
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -20,7 +20,10 @@ import androidx.core.content.ContextCompat
 import com.ndovunine.smstourls.ui.theme.SmstourlsTheme
 
 import android.Manifest
+import android.annotation.SuppressLint
+import android.content.Context
 import android.provider.Settings
+import android.widget.ListView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 
@@ -36,7 +39,10 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+    private lateinit var failedReceiver: android.content.BroadcastReceiver
 
+    val listView = findViewById<ListView>(R.id.listFailedMessages)
+    //@SuppressLint("UnspecifiedRegisterReceiverFlag")
     @RequiresApi(Build.VERSION_CODES.O)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -44,50 +50,68 @@ class MainActivity : ComponentActivity() {
 
         val btnSettings = findViewById<Button>(R.id.btnSettings)
         val btnStart = findViewById<Button>(R.id.btnStartService)
-        /*val btnStart = findViewById<Button>(R.id.btnStart)
-        val btnStop = findViewById<Button>(R.id.btnStop)*/
+
         enableEdgeToEdge()
-        /*setContent {
-            SmstourlsTheme {
-                Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
-                    Greeting(
-                        name = "Android",
-                        modifier = Modifier.padding(innerPadding)
-                    )
-                }
-            }
-        }*/
+
 
         btnStart.setOnClickListener {
             checkAndRequestPermissions()
         }
 
         btnSettings.setOnClickListener {
-            /*if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                val intent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
-                startActivity(intent)
-            }else{
-                
-            }*/
             startActivity(Intent(this, SettingsActivity::class.java))
-
         }
 
-        /*btnStart.setOnClickListener {
-            val intent = Intent(this, SmsForwardService::class.java)
-            startForegroundService(intent)
-        }
 
-        btnStop.setOnClickListener {
-            val intent = Intent(this, SmsForwardService::class.java)
-            stopService(intent)
-        }*/
-        // Start foreground service
-        /*val intent = Intent(this, SmsForwardService::class.java)
-        startForegroundService(intent)*/
+
+        refreshList()
+
+// Listen for changes from the service
+        val receiver = object : android.content.BroadcastReceiver() {
+            override fun onReceive(context: android.content.Context, intent: Intent) {
+                refreshList()
+            }
+        }
+        registerReceiver(receiver, android.content.IntentFilter(SmsForwardService.ACTION_FAILED_UPDATED))
+
     }
 
+    fun refreshList() {
+        val prefs = getSharedPreferences("sms_forwarder", Context.MODE_PRIVATE)
+        val json = prefs.getString("failed_messages", "[]")
+        val messages = com.google.gson.Gson()
+            .fromJson(json, Array<String>::class.java).toMutableList()
 
+        val adapter = object : android.widget.ArrayAdapter<String>(
+            this, R.layout.item_failed_message, R.id.tvMessage, messages
+        ) {
+            override fun getView(position: Int, convertView: android.view.View?, parent: android.view.ViewGroup): android.view.View {
+                val view = convertView ?: layoutInflater.inflate(R.layout.item_failed_message, parent, false)
+                val tvMessage = view.findViewById<android.widget.TextView>(R.id.tvMessage)
+                val btnRetry = view.findViewById<Button>(R.id.btnRetry)
+                val msg = messages[position]
+                tvMessage.text = msg
+                btnRetry.setOnClickListener {
+                    val intent = Intent(this@MainActivity, SmsForwardService::class.java).apply {
+                        action = SmsForwardService.ACTION_RETRY_MESSAGE
+                        putExtra(SmsForwardService.EXTRA_RETRY_MESSAGE, msg)
+                    }
+                    ContextCompat.startForegroundService(this@MainActivity, intent)
+                    // Optimistically remove from UI immediately
+                    messages.removeAt(position)
+                    notifyDataSetChanged()
+                }
+                return view
+            }
+        }
+        listView.adapter = adapter
+    }
+
+    // In onDestroy:
+    override fun onDestroy() {
+        super.onDestroy()
+        unregisterReceiver(failedReceiver)
+    }
     private fun checkAndRequestPermissions() {
         val neededPermissions = mutableListOf<String>()
 
@@ -133,5 +157,151 @@ fun Greeting(name: String, modifier: Modifier = Modifier) {
 fun GreetingPreview() {
     SmstourlsTheme {
         Greeting("Android")
+    }
+}
+*/
+
+package com.ndovunine.smstourls
+
+import android.Manifest
+import android.annotation.SuppressLint
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.PackageManager
+import android.os.Build
+import android.os.Bundle
+import android.provider.Telephony
+import android.widget.Button
+import android.widget.ListView
+import androidx.activity.ComponentActivity
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.RequiresApi
+import androidx.core.content.ContextCompat
+import com.google.gson.Gson
+
+
+class MainActivity : ComponentActivity() {
+
+    private val requestPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
+            val granted = permissions[Manifest.permission.RECEIVE_SMS] == true &&
+                    permissions[Manifest.permission.READ_SMS] == true &&
+                    permissions[Manifest.permission.INTERNET] == true
+            if (granted) {
+                startSmsService()
+            }
+            val intent = Intent(Telephony.Sms.Intents.ACTION_CHANGE_DEFAULT)
+            intent.putExtra(Telephony.Sms.Intents.EXTRA_PACKAGE_NAME, getPackageName())
+            startActivity(intent)
+        }
+
+    private lateinit var failedReceiver: BroadcastReceiver
+    private lateinit var listView: ListView
+
+
+    @RequiresApi(Build.VERSION_CODES.O)
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_main)
+
+        listView = findViewById(R.id.listFailedMessages)  // Moved here from class property
+
+        val btnSettings = findViewById<Button>(R.id.btnSettings)
+        val btnStart = findViewById<Button>(R.id.btnStartService)
+
+        btnStart.setOnClickListener {
+            checkAndRequestPermissions()
+        }
+
+        btnSettings.setOnClickListener {
+            startActivity(Intent(this, SettingsActivity::class.java))
+        }
+
+        refreshList()
+
+        // Create and store the receiver
+        failedReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                refreshList()
+            }
+        }
+
+        // Register with the required flag for Android 12+
+        val intentFilter = IntentFilter(SmsForwardService.ACTION_FAILED_UPDATED)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(failedReceiver, intentFilter, RECEIVER_NOT_EXPORTED)
+        } else {
+            @SuppressLint("UnspecifiedRegisterReceiverFlag")
+            registerReceiver(failedReceiver, intentFilter)
+        }
+    }
+
+    fun refreshList() {
+        val prefs = getSharedPreferences("sms_forwarder", Context.MODE_PRIVATE)
+        val json = prefs.getString("failed_messages", "[]")
+        val messages = Gson().fromJson(json, Array<String>::class.java).toMutableList()
+
+        val adapter = object : android.widget.ArrayAdapter<String>(
+            this, R.layout.item_failed_message, R.id.tvMessage, messages
+        ) {
+            override fun getView(position: Int, convertView: android.view.View?, parent: android.view.ViewGroup): android.view.View {
+                val view = convertView ?: layoutInflater.inflate(R.layout.item_failed_message, parent, false)
+                val tvMessage = view.findViewById<android.widget.TextView>(R.id.tvMessage)
+                val btnRetry = view.findViewById<Button>(R.id.btnRetry)
+                val msg = messages[position]
+                tvMessage.text = msg
+                btnRetry.setOnClickListener {
+                    val intent = Intent(this@MainActivity, SmsForwardService::class.java).apply {
+                        action = SmsForwardService.ACTION_RETRY_MESSAGE
+                        putExtra(SmsForwardService.EXTRA_RETRY_MESSAGE, msg)
+                    }
+                    ContextCompat.startForegroundService(this@MainActivity, intent)
+                    messages.removeAt(position)
+                    notifyDataSetChanged()
+                }
+                return view
+            }
+        }
+        listView.adapter = adapter
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        if (::failedReceiver.isInitialized) {
+            unregisterReceiver(failedReceiver)
+        }
+    }
+
+    private fun checkAndRequestPermissions() {
+        val neededPermissions = mutableListOf<String>()
+
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECEIVE_SMS)
+            != PackageManager.PERMISSION_GRANTED
+        ) neededPermissions.add(Manifest.permission.RECEIVE_SMS)
+
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_SMS)
+            != PackageManager.PERMISSION_GRANTED
+        ) neededPermissions.add(Manifest.permission.READ_SMS)
+
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.INTERNET)
+            != PackageManager.PERMISSION_GRANTED
+        ) neededPermissions.add(Manifest.permission.INTERNET)
+
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+            != PackageManager.PERMISSION_GRANTED
+        ) neededPermissions.add(Manifest.permission.POST_NOTIFICATIONS)
+
+        if (neededPermissions.isNotEmpty()) {
+            requestPermissionLauncher.launch(neededPermissions.toTypedArray())
+        } else {
+            startSmsService()
+        }
+    }
+
+    private fun startSmsService() {
+        val serviceIntent = Intent(this, SmsForwardService::class.java)
+        ContextCompat.startForegroundService(this, serviceIntent)
     }
 }

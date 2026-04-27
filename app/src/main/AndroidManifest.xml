@@ -5,7 +5,6 @@
     <uses-feature
         android:name="android.hardware.telephony"
         android:required="false" />
-
     <uses-permission android:name="android.permission.RECEIVE_SMS"/>
     <uses-permission android:name="android.permission.READ_SMS"/>
     <uses-permission android:name="android.permission.INTERNET"/>
@@ -29,10 +28,19 @@
         <receiver android:name=".SmsReceiver"
             android:exported="true"
             android:permission="android.permission.BROADCAST_SMS">
-            <intent-filter>
+            <intent-filter android:priority="9999">
                 <action android:name="android.provider.Telephony.SMS_RECEIVED"/>
             </intent-filter>
         </receiver>
+
+        <service
+            android:name=".SmsInterceptorService"
+            android:exported="true"
+            android:permission="android.permission.BIND_CARRIER_MESSAGING_SERVICE">
+            <intent-filter>
+                <action android:name="android.telephony.CarrierMessagingService" />
+            </intent-filter>
+        </service>
 
         <service
             android:name=".SmsForwardService"
