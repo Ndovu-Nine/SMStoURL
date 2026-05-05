@@ -43,7 +43,6 @@ class MainActivity : ComponentActivity() {
 
     val listView = findViewById<ListView>(R.id.listFailedMessages)
     //@SuppressLint("UnspecifiedRegisterReceiverFlag")
-    @RequiresApi(Build.VERSION_CODES.O)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
@@ -172,12 +171,10 @@ import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
-import android.provider.Telephony
 import android.widget.Button
 import android.widget.ListView
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.annotation.RequiresApi
 import androidx.core.content.ContextCompat
 import com.google.gson.Gson
 
@@ -199,7 +196,6 @@ class MainActivity : ComponentActivity() {
     private lateinit var listView: ListView
 
 
-    @RequiresApi(Build.VERSION_CODES.O)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
@@ -305,7 +301,5 @@ class MainActivity : ComponentActivity() {
             // Show a dialog explaining why, then:
             DefaultSmsAppHelper.promptSetAsDefault(this)
         }
-        intent.putExtra(Telephony.Sms.Intents.EXTRA_PACKAGE_NAME, getPackageName())
-        startActivity(intent)
     }
 }

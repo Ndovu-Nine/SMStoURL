@@ -1,6 +1,5 @@
 package com.ndovunine.smstourls
 
-import android.R
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -11,8 +10,6 @@ import android.database.Cursor
 import android.net.Uri
 import android.os.Build
 import android.os.IBinder
-import androidx.annotation.RequiresApi
-import androidx.core.app.NotificationCompat
 import com.google.gson.Gson
 import okhttp3.Call
 import okhttp3.Callback
@@ -31,15 +28,6 @@ class SmsForwardService : Service() {
     private val client:OkHttpClient by lazy { getUnsafeOkHttpClient() }
     private val gson = Gson()
     private val prefs by lazy { getSharedPreferences("sms_forwarder", Context.MODE_PRIVATE) }
-
-    // Example: You can later load these from SharedPreferences
-    private val urls = listOf(
-        "http://yoururl:port/sms",
-        "https://fivayapi.ndovunine.com/api/transaction/addSMS"
-    )
-
-    // Email is set by user in settings (later we’ll add UI)
-    private val email = "email@domain.com"
 
     companion object {
         const val ACTION_RETRY_MESSAGE = "com.ndovunine.smstourls.RETRY_MESSAGE"
@@ -89,13 +77,14 @@ class SmsForwardService : Service() {
             Notification.Builder(this, channelId)
                 .setContentTitle("SMS to URLs")
                 .setContentText("$count SMS forwarded")
-                .setSmallIcon(android.R.mipmap.sym_def_app_icon)
+                .setSmallIcon(android.R.drawable.ic_dialog_info)
                 .build()
         } else {
+            @Suppress("DEPRECATION")
             Notification.Builder(this)
                 .setContentTitle("SMS to URLs")
                 .setContentText("$count SMS forwarded")
-                .setSmallIcon(android.R.mipmap.sym_def_app_icon)
+                .setSmallIcon(android.R.drawable.ic_dialog_info)
                 .setPriority(Notification.PRIORITY_LOW)
                 .build()
         }
@@ -104,22 +93,11 @@ class SmsForwardService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    @RequiresApi(Build.VERSION_CODES.O)
     override fun onCreate() {
         super.onCreate()
         startForegroundService()
         startRetryLoop()
     }
-
-    /*override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // Receive SMS message from intent
-        val message = intent?.getStringExtra("sms_message")
-        val sender = intent?.getStringExtra("sms_sender") ?: "Unknown"
-        if (!message.isNullOrBlank()) {
-            forwardMessage(message,sender)
-        }
-        return START_STICKY
-    }*/
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
@@ -153,11 +131,9 @@ class SmsForwardService : Service() {
         sendBroadcast(intent)
     }
 
-    @RequiresApi(Build.VERSION_CODES.O)
     private fun startForegroundService() {
         val notificationManager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-        var notification: Notification
-
+        val notification: Notification
 
         val channelId = "SmsForwarderChannel"
         val channelName = "SMS to URLs"
@@ -167,21 +143,19 @@ class SmsForwardService : Service() {
                 channelId, channelName,
                 NotificationManager.IMPORTANCE_LOW
             )
-            if(notificationManager!=null){
-                notificationManager.createNotificationChannel(channel)
-            }
+            notificationManager.createNotificationChannel(channel)
 
             notification = Notification.Builder(this, channelId)
                 .setContentTitle("SMS to URLs")
                 .setContentText("Forwarding SMS to saved URLs")
-                .setSmallIcon(R.mipmap.sym_def_app_icon) // Ensure this icon exists in res/drawable
+                .setSmallIcon(android.R.drawable.ic_dialog_info)
                 .build()
-        }
-        else{
+        } else {
+            @Suppress("DEPRECATION")
             notification = Notification.Builder(this)
                 .setContentTitle("SMS to URLs")
                 .setContentText("Forwarding SMS to saved URLs")
-                .setSmallIcon(R.mipmap.sym_def_app_icon) // Ensure this icon exists in res/drawable
+                .setSmallIcon(android.R.drawable.ic_dialog_info)
                 .setPriority(Notification.PRIORITY_LOW)
                 .build()
         }
@@ -250,11 +224,31 @@ class SmsForwardService : Service() {
         val json = prefs.getString("failed_messages", "[]")
         return gson.fromJson(json, Array<String>::class.java).toList()
     }
-    private fun retryFailedMessages()  {
+
+    /**
+     * Retry all failed messages.
+     * Handles both:
+     *  - Plain string messages (saved by saveFailedMessage(message))
+     *  - JSON object entries (saved by saveFailedMessage(message, sender))
+     */
+    private fun retryFailedMessages() {
         val failed = loadFailedMessages().toMutableList()
         for (entry in failed) {
-            val map = gson.fromJson(entry, Map::class.java)
-            forwardMessage(map["message"] as String, map["sender"] as? String ?: "Unknown")
+            try {
+                // Try parsing as JSON object first (sender-aware format)
+                val map = gson.fromJson(entry, Map::class.java)
+                val msg = map["message"] as? String
+                val sender = map["sender"] as? String ?: "Unknown"
+                if (msg != null) {
+                    forwardMessage(msg, sender)
+                } else {
+                    // If "message" key is missing, treat the whole entry as the message
+                    forwardMessage(entry)
+                }
+            } catch (e: Exception) {
+                // Not a JSON object — treat as plain text message
+                forwardMessage(entry)
+            }
         }
         prefs.edit().putString("failed_messages", "[]").apply()
     }
@@ -283,11 +277,11 @@ class SmsForwardService : Service() {
             cursor?.use {
                 while (it.moveToNext()) {
                     val body = it.getString(it.getColumnIndexOrThrow("body"))
-                    val sender = it.getString(it.getColumnIndexOrThrow("address")) ?: "Unknown"  // ← add
+                    val sender = it.getString(it.getColumnIndexOrThrow("address")) ?: "Unknown"
                     val id = it.getLong(it.getColumnIndexOrThrow("_id"))
 
                     if (!prefs.getBoolean("sent_$id", false)) {
-                        forwardMessage(body, sender)  // ← pass sender
+                        forwardMessage(body, sender)
                         prefs.edit().putBoolean("sent_$id", true).apply()
                     }
                 }

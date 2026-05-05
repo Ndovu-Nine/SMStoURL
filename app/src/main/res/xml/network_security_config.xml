@@ -1,8 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
     <!-- Allow cleartext (http) for all domains -->
-    <domain-config cleartextTrafficPermitted="true">
-        <domain includeSubdomains="true">192.168.1.40</domain>
-        <domain includeSubdomains="true">* </domain>
-    </domain-config>
+    <base-config cleartextTrafficPermitted="true" />
 </network-security-config>
