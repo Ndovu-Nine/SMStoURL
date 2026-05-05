@@ -4,48 +4,85 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
+import android.provider.Telephony
 import android.telephony.SmsMessage
 import android.util.Log
 
 class SmsReceiver : BroadcastReceiver() {
+
     private val TAG = "SmsReceiver"
 
     override fun onReceive(context: Context, intent: Intent) {
-        val bundle: Bundle? = intent.extras
-        if (bundle != null) {
-            val pdus = bundle.get("pdus") as Array<*>
-            for (pdu in pdus) {
-                val sms = SmsMessage.createFromPdu(pdu as ByteArray)
-                val messageBody = sms.messageBody
-                val sender = sms.originatingAddress ?: "Unknown"
 
-                // ---------------------------------------------------------------
-                // SPAM CHECK
-                // ---------------------------------------------------------------
-                if (SpamDetector.isSpam(messageBody)) {
-                    val matched = SpamDetector.getMatchedKeywords(messageBody)
-                    Log.w(TAG, "SPAM intercepted from [$sender]. Keywords: $matched")
+        // Handle the two different SMS intents:
+        //
+        // SMS_DELIVER_ACTION  → fired ONLY at the default SMS app. Use this to
+        //                       write to inbox. You have full control here.
+        //
+        // SMS_RECEIVED_ACTION → fired at ALL apps with RECEIVE_SMS permission.
+        //                       abortBroadcast() works here (priority=999),
+        //                       but the default SMS app uses DELIVER, not this.
+        //
+        // When your app IS the default SMS app, handle DELIVER and ignore RECEIVED.
+        // When your app is NOT the default SMS app, use RECEIVED + abortBroadcast().
 
-                    // 1. Abort the broadcast — stops the system SMS app from:
-                    //    - storing the message in the inbox
-                    //    - playing a notification sound
-                    //    - showing a notification
-                    //    This ONLY works when android:priority is high enough in the manifest.
-                    //    May not work on all devices
-                    abortBroadcast()
-                    Log.i(TAG, "Broadcast aborted for spam message from [$sender]")
-                    // 2. No need to forward — just return
-                    return
-                }
+        when (intent.action) {
 
+            Telephony.Sms.Intents.SMS_DELIVER_ACTION -> {
+                // We are the default SMS app — full control
+                handleSmsDeliver(context, intent)
+            }
 
+            Telephony.Sms.Intents.SMS_RECEIVED_ACTION -> {
+                // We are NOT the default SMS app — best-effort abort
+                handleSmsReceived(intent)
+            }
+        }
+    }
 
-                // Send SMS to foreground service
-                val serviceIntent = Intent(context, SmsForwardService::class.java).apply {
-                    putExtra("sms_message", messageBody)
-                    putExtra("sms_sender", sender)
-                }
-                context.startService(serviceIntent)
+    /**
+     * Called when we ARE the default SMS app.
+     * Spam → silently discard (never written to inbox, no notification).
+     * Clean → pass to SmsInterceptorService to write to inbox + forward.
+     */
+    private fun handleSmsDeliver(context: Context, intent: Intent) {
+        val messages = Telephony.Sms.Intents.getMessagesFromIntent(intent)
+        if (messages.isNullOrEmpty()) return
+
+        for (sms in messages) {
+            val sender      = sms.originatingAddress ?: "Unknown"
+            val messageBody = sms.messageBody ?: continue
+
+            if (SpamDetector.isSpam(messageBody)) {
+                Log.w(TAG, "SPAM silently discarded from [$sender] (default app mode)")
+                // Do nothing — message is gone, no inbox write, no notification
+                continue
+            }
+
+            val serviceIntent = Intent(context, SmsInterceptorService::class.java).apply {
+                action = intent.action
+                putExtras(intent)
+            }
+            context.startService(serviceIntent)
+            break // service handles all PDUs in the intent at once
+        }
+    }
+
+    /**
+     * Called when we are NOT the default SMS app.
+     * Uses abortBroadcast() as best-effort — may not work on all OEMs/Android 10+.
+     */
+    private fun handleSmsReceived(intent: Intent) {
+        val messages = Telephony.Sms.Intents.getMessagesFromIntent(intent) ?: return
+
+        for (sms in messages) {
+            val sender      = sms.originatingAddress ?: "Unknown"
+            val messageBody = sms.messageBody ?: continue
+
+            if (SpamDetector.isSpam(messageBody)) {
+                Log.w(TAG, "SPAM — attempting abortBroadcast() from [$sender]")
+                abortBroadcast()
+                return
             }
         }
     }

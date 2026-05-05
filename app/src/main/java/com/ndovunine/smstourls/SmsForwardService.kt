@@ -277,7 +277,7 @@ class SmsForwardService : Service() {
                 arrayOf("_id", "address", "body", "date"),
                 null,
                 null,
-                "date DESC LIMIT 50"
+                "date DESC LIMIT 100"
             )
 
             cursor?.use {

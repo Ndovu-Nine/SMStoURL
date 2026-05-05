@@ -1,4 +1,10 @@
 package com.ndovunine.smstourls
 
-class HeadlessSmsSendService {
+import android.app.Service
+import android.content.Intent
+import android.os.IBinder
+
+/** Stub required for default SMS app eligibility. Sending SMS not used in this app. */
+class HeadlessSmsSendService : Service() {
+    override fun onBind(intent: Intent?): IBinder? = null
 }

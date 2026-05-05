@@ -184,6 +184,7 @@ import com.google.gson.Gson
 
 class MainActivity : ComponentActivity() {
 
+
     private val requestPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
             val granted = permissions[Manifest.permission.RECEIVE_SMS] == true &&
@@ -192,9 +193,6 @@ class MainActivity : ComponentActivity() {
             if (granted) {
                 startSmsService()
             }
-            val intent = Intent(Telephony.Sms.Intents.ACTION_CHANGE_DEFAULT)
-            intent.putExtra(Telephony.Sms.Intents.EXTRA_PACKAGE_NAME, getPackageName())
-            startActivity(intent)
         }
 
     private lateinit var failedReceiver: BroadcastReceiver
@@ -303,5 +301,11 @@ class MainActivity : ComponentActivity() {
     private fun startSmsService() {
         val serviceIntent = Intent(this, SmsForwardService::class.java)
         ContextCompat.startForegroundService(this, serviceIntent)
+        if (!DefaultSmsAppHelper.isDefaultSmsApp(this)) {
+            // Show a dialog explaining why, then:
+            DefaultSmsAppHelper.promptSetAsDefault(this)
+        }
+        intent.putExtra(Telephony.Sms.Intents.EXTRA_PACKAGE_NAME, getPackageName())
+        startActivity(intent)
     }
 }
