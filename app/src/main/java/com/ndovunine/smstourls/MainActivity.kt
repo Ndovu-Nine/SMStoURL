@@ -128,6 +128,14 @@ class MainActivity : ComponentActivity() {
             != PackageManager.PERMISSION_GRANTED
         ) neededPermissions.add(Manifest.permission.POST_NOTIFICATIONS)
 
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.SEND_SMS)
+            != PackageManager.PERMISSION_GRANTED
+        ) neededPermissions.add(Manifest.permission.SEND_SMS)
+
+        /*if (ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_SMS)
+            != PackageManager.PERMISSION_GRANTED
+        ) neededPermissions.add(Manifest.permission.WRITE_SMS)*/
+
         if (neededPermissions.isNotEmpty()) {
             requestPermissionLauncher.launch(neededPermissions.toTypedArray())
         } else {
@@ -141,6 +149,21 @@ class MainActivity : ComponentActivity() {
         if (!DefaultSmsAppHelper.isDefaultSmsApp(this)) {
             // Show a dialog explaining why, then:
             DefaultSmsAppHelper.promptSetAsDefault(this)
+        }
+    }
+
+    /**
+     * Handle the result from the RoleManager default SMS request (Android 10+).
+     */
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == 1001) {
+            if (DefaultSmsAppHelper.isDefaultSmsApp(this)) {
+                android.widget.Toast.makeText(this, "Default SMS app set successfully", android.widget.Toast.LENGTH_SHORT).show()
+            } else {
+                android.widget.Toast.makeText(this, "Default SMS app not set — spam blocking may not work", android.widget.Toast.LENGTH_LONG).show()
+            }
         }
     }
 }
