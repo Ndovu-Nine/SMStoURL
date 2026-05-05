@@ -9,7 +9,7 @@
         android:layout_width="366dp"
         android:layout_height="wrap_content"
         android:layout_marginTop="100dp"
-        android:text="Start SMS Forwarder" />
+        android:text="Restart SMS Forwarder" />
 
     <Button
         android:id="@+id/btnSettings"
@@ -37,4 +37,3 @@
         android:dividerHeight="1dp" />
 
 </LinearLayout>
-
