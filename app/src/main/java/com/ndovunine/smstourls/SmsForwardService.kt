@@ -95,11 +95,31 @@ class SmsForwardService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        startForegroundService()
+        // Create notification channel on API 26+ (safe to do here)
+        createNotificationChannel()
+        // Do NOT call startForeground() here — it will be called in onStartCommand()
+        // to avoid ForegroundServiceStartNotAllowedException on Android 14+
+        // when the system restarts the service from background.
         startRetryLoop()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Call startForeground() here instead of onCreate() so that when the
+        // system restarts the service from background, we can catch the
+        // ForegroundServiceStartNotAllowedException gracefully.
+        if (!isForeground) {
+            try {
+                enterForeground()
+            } catch (e: RuntimeException) {
+                // On Android 14+ (API 34+), ForegroundServiceStartNotAllowedException
+                // is thrown if the background time limit is exhausted.
+                // Gracefully stop instead of crashing.
+                android.util.Log.e("SmsForwardService", "Failed to start foreground service", e)
+                stopSelf()
+                return START_NOT_STICKY
+            }
+        }
+
         when (intent?.action) {
             ACTION_RETRY_MESSAGE -> {
                 val message = intent.getStringExtra(EXTRA_RETRY_MESSAGE)
@@ -119,6 +139,39 @@ class SmsForwardService : Service() {
         return START_STICKY
     }
 
+    private var isForeground = false
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val notificationManager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+            val channel = NotificationChannel(
+                channelId, "SMS to URLs",
+                NotificationManager.IMPORTANCE_LOW
+            )
+            notificationManager.createNotificationChannel(channel)
+        }
+    }
+
+    private fun enterForeground() {
+        val notification: Notification = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Notification.Builder(this, channelId)
+                .setContentTitle("SMS to URLs")
+                .setContentText("Forwarding SMS to saved URLs")
+                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .build()
+        } else {
+            @Suppress("DEPRECATION")
+            Notification.Builder(this)
+                .setContentTitle("SMS to URLs")
+                .setContentText("Forwarding SMS to saved URLs")
+                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .setPriority(Notification.PRIORITY_LOW)
+                .build()
+        }
+        startForeground(1, notification)
+        isForeground = true
+    }
+
     private fun removeFailedMessage(message: String) {
         val failed = loadFailedMessages().toMutableList()
         failed.remove(message)
@@ -129,38 +182,6 @@ class SmsForwardService : Service() {
     private fun broadcastFailedUpdated() {
         val intent = Intent(ACTION_FAILED_UPDATED)
         sendBroadcast(intent)
-    }
-
-    private fun startForegroundService() {
-        val notificationManager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-        val notification: Notification
-
-        val channelId = "SmsForwarderChannel"
-        val channelName = "SMS to URLs"
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                channelId, channelName,
-                NotificationManager.IMPORTANCE_LOW
-            )
-            notificationManager.createNotificationChannel(channel)
-
-            notification = Notification.Builder(this, channelId)
-                .setContentTitle("SMS to URLs")
-                .setContentText("Forwarding SMS to saved URLs")
-                .setSmallIcon(android.R.drawable.ic_dialog_info)
-                .build()
-        } else {
-            @Suppress("DEPRECATION")
-            notification = Notification.Builder(this)
-                .setContentTitle("SMS to URLs")
-                .setContentText("Forwarding SMS to saved URLs")
-                .setSmallIcon(android.R.drawable.ic_dialog_info)
-                .setPriority(Notification.PRIORITY_LOW)
-                .build()
-        }
-
-        startForeground(1, notification)
     }
 
 
