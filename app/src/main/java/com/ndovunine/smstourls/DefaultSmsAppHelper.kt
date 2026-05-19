@@ -1,7 +1,6 @@
 package com.ndovunine.smstourls
 
 import android.app.Activity
-import android.app.role.RoleManager
 import android.content.Context
 import android.content.Intent
 import android.os.Build
@@ -11,9 +10,9 @@ import android.widget.Toast
 /**
  * Helper to prompt the user to set this app as the default SMS app.
  *
- * On Android 10+ (API 29+), uses RoleManager which is the official way
- * to request the default SMS role. Falls back to the old
- * ACTION_CHANGE_DEFAULT intent on older versions.
+ * On Android 10+ (API 29+), the caller should use RoleManager directly
+ * via createRequestRoleIntent(). This helper provides the legacy fallback
+ * for pre-Android 10 devices.
  *
  * Call promptSetAsDefault() from MainActivity — ideally show a rationale
  * dialog first explaining why this gives better spam blocking.
@@ -30,25 +29,10 @@ object DefaultSmsAppHelper {
             return
         }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            promptSetAsDefaultRoleManager(activity)
-        } else {
+        // On Android 10+, RoleManager should be used directly by the caller.
+        // This fallback is for pre-Android 10 only.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
             promptSetAsDefaultLegacy(activity)
-        }
-    }
-
-    /**
-     * Android 10+ (API 29+): Use RoleManager to request the default SMS role.
-     * This is the only way your app will appear in the system chooser on
-     * Android 15 and later.
-     */
-    private fun promptSetAsDefaultRoleManager(activity: Activity) {
-        val roleManager = activity.getSystemService(RoleManager::class.java)
-        if (roleManager.isRoleAvailable(RoleManager.ROLE_SMS) &&
-            !roleManager.isRoleHeld(RoleManager.ROLE_SMS)
-        ) {
-            val intent = roleManager.createRequestRoleIntent(RoleManager.ROLE_SMS)
-            activity.startActivityForResult(intent, REQUEST_CODE_DEFAULT_SMS)
         }
     }
 
@@ -72,6 +56,4 @@ object DefaultSmsAppHelper {
         val intent = Intent(android.provider.Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS)
         activity.startActivity(intent)
     }
-
-    private const val REQUEST_CODE_DEFAULT_SMS = 1001
 }

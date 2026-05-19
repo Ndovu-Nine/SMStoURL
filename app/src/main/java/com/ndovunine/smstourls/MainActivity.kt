@@ -2,6 +2,7 @@ package com.ndovunine.smstourls
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.role.RoleManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -9,8 +10,10 @@ import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import android.widget.Button
 import android.widget.ListView
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
@@ -19,6 +22,9 @@ import com.google.gson.Gson
 
 class MainActivity : ComponentActivity() {
 
+    companion object {
+        private const val TAG = "MainActivity"
+    }
 
     private val requestPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
@@ -30,6 +36,16 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+    private val smsRoleLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            if (DefaultSmsAppHelper.isDefaultSmsApp(this)) {
+                Toast.makeText(this, "Default SMS app set successfully", Toast.LENGTH_SHORT).show()
+                startSmsService()
+            } else {
+                Toast.makeText(this, "Default SMS app not set — spam blocking may not work", Toast.LENGTH_LONG).show()
+            }
+        }
+
     private lateinit var failedReceiver: BroadcastReceiver
     private lateinit var listView: ListView
 
@@ -38,7 +54,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        listView = findViewById(R.id.listFailedMessages)  // Moved here from class property
+        listView = findViewById(R.id.listFailedMessages)
 
         val btnSettings = findViewById<Button>(R.id.btnSettings)
         val btnStart = findViewById<Button>(R.id.btnStartService)
@@ -132,10 +148,6 @@ class MainActivity : ComponentActivity() {
             != PackageManager.PERMISSION_GRANTED
         ) neededPermissions.add(Manifest.permission.SEND_SMS)
 
-        /*if (ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_SMS)
-            != PackageManager.PERMISSION_GRANTED
-        ) neededPermissions.add(Manifest.permission.WRITE_SMS)*/
-
         if (neededPermissions.isNotEmpty()) {
             requestPermissionLauncher.launch(neededPermissions.toTypedArray())
         } else {
@@ -147,23 +159,24 @@ class MainActivity : ComponentActivity() {
         val serviceIntent = Intent(this, SmsForwardService::class.java)
         ContextCompat.startForegroundService(this, serviceIntent)
         if (!DefaultSmsAppHelper.isDefaultSmsApp(this)) {
-            // Show a dialog explaining why, then:
-            DefaultSmsAppHelper.promptSetAsDefault(this)
+            requestDefaultSmsRole()
         }
     }
 
-    /**
-     * Handle the result from the RoleManager default SMS request (Android 10+).
-     */
-    @Deprecated("Deprecated in Java")
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == 1001) {
-            if (DefaultSmsAppHelper.isDefaultSmsApp(this)) {
-                android.widget.Toast.makeText(this, "Default SMS app set successfully", android.widget.Toast.LENGTH_SHORT).show()
-            } else {
-                android.widget.Toast.makeText(this, "Default SMS app not set — spam blocking may not work", android.widget.Toast.LENGTH_LONG).show()
+    private fun requestDefaultSmsRole() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val roleManager = getSystemService(RoleManager::class.java)
+            Log.d(TAG, "RoleManager SMS role available: ${roleManager.isRoleAvailable(RoleManager.ROLE_SMS)}")
+            Log.d(TAG, "RoleManager SMS role held: ${roleManager.isRoleHeld(RoleManager.ROLE_SMS)}")
+            if (roleManager.isRoleAvailable(RoleManager.ROLE_SMS) &&
+                !roleManager.isRoleHeld(RoleManager.ROLE_SMS)
+            ) {
+                val intent = roleManager.createRequestRoleIntent(RoleManager.ROLE_SMS)
+                smsRoleLauncher.launch(intent)
             }
+        } else {
+            // Pre-Android 10: use legacy fallback
+            DefaultSmsAppHelper.promptSetAsDefault(this)
         }
     }
 }
