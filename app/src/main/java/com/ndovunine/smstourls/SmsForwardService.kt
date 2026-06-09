@@ -9,7 +9,9 @@ import android.content.Intent
 import android.database.Cursor
 import android.net.Uri
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import com.google.gson.Gson
 import okhttp3.Call
 import okhttp3.Callback
@@ -19,8 +21,6 @@ import okhttp3.Request
 import okhttp3.RequestBody
 import okhttp3.Response
 import java.io.IOException
-import java.util.Timer
-import kotlin.concurrent.fixedRateTimer
 
 
 class SmsForwardService : Service() {
@@ -33,6 +33,8 @@ class SmsForwardService : Service() {
         const val ACTION_RETRY_MESSAGE = "com.ndovunine.smstourls.RETRY_MESSAGE"
         const val ACTION_FAILED_UPDATED = "com.ndovunine.smstourls.FAILED_UPDATED"
         const val EXTRA_RETRY_MESSAGE = "retry_message"
+        private const val RETRY_INTERVAL_MS = 1 * 60 * 1000L // 1 minutes
+        private const val MAX_SENT_IDS = 500 // Keep only the last 500 sent IDs
     }
 
     private fun getUnsafeOkHttpClient(): OkHttpClient {
@@ -61,7 +63,8 @@ class SmsForwardService : Service() {
     }
 
 
-    private var retryTimer: Timer? = null
+    private var retryHandler: Handler? = null
+    private var retryRunnable: Runnable? = null
     private val NOTIF_ID = 1
     private val channelId = "SmsForwarderChannel"
 
@@ -139,6 +142,14 @@ class SmsForwardService : Service() {
         return START_STICKY
     }
 
+    override fun onDestroy() {
+        super.onDestroy()
+        // Stop the retry handler to prevent leaks
+        retryHandler?.removeCallbacksAndMessages(null)
+        retryHandler = null
+        retryRunnable = null
+    }
+
     private var isForeground = false
 
     private fun createNotificationChannel() {
@@ -195,21 +206,23 @@ class SmsForwardService : Service() {
         val payload = mapOf("message" to message,"sender" to sender, "email" to email)
         val json = gson.toJson(payload)
 
-        val requestBody = RequestBody.create("application/json; charset=utf-8".toMediaType(), json)
         val urlList = urls.split(",").map { it.trim() }.filter { it.isNotEmpty() }
 
         for (url in urlList) {
+            // Create a fresh RequestBody for each URL to avoid "closed" IllegalStateException
+            val requestBody = RequestBody.create("application/json; charset=utf-8".toMediaType(), json)
             val request = Request.Builder().url(url).post(requestBody).build()
 
             client.newCall(request).enqueue(object : Callback {
                 override fun onFailure(call: Call, e: IOException) {
-                    e.printStackTrace()
-                    saveFailedMessage(message,sender) // store for retry
+                    android.util.Log.e("SmsForwardService", "Failed to forward to $url", e)
+                    saveFailedMessage(message, sender) // store for retry
                 }
 
                 override fun onResponse(call: Call, response: Response) {
                     if (!response.isSuccessful) {
-                        saveFailedMessage(message,sender)
+                        android.util.Log.w("SmsForwardService", "HTTP ${response.code} from $url")
+                        saveFailedMessage(message, sender)
                     }
                     else{
                         forwardedCount += 1   // count up
@@ -274,13 +287,23 @@ class SmsForwardService : Service() {
         prefs.edit().putString("failed_messages", "[]").apply()
     }
 
-    /** Retry loop every 30 minutes */
+    /** Retry loop every 30 minutes using Handler (main thread) instead of daemon timer thread */
     private fun startRetryLoop() {
-        retryTimer = fixedRateTimer("retry", true, 0L, 30 * 60 * 1000) {
-            retryFailedMessages()
-            // Also check inbox last 100 SMS
-            syncLastInboxMessages()
+        retryHandler = Handler(Looper.getMainLooper())
+        retryRunnable = object : Runnable {
+            override fun run() {
+                try {
+                    retryFailedMessages()
+                    syncLastInboxMessages()
+                } catch (e: Exception) {
+                    android.util.Log.e("SmsForwardService", "Error in retry loop", e)
+                }
+                // Re-schedule for next interval
+                retryHandler?.postDelayed(this, RETRY_INTERVAL_MS)
+            }
         }
+        // Run immediately, then every 30 minutes
+        retryHandler?.post(retryRunnable!!)
     }
 
     /** Query last 100 SMS from inbox and forward unsent ones */
@@ -308,7 +331,37 @@ class SmsForwardService : Service() {
                 }
             }
         } catch (e: Exception) {
-            e.printStackTrace()
+            android.util.Log.e("SmsForwardService", "Error syncing inbox", e)
+        } finally {
+            // Prune old sent_* entries to prevent SharedPreferences bloat
+            pruneSentIds()
+        }
+    }
+
+    /**
+     * Prune old sent_* entries from SharedPreferences to prevent unbounded growth.
+     * Keeps only the most recent MAX_SENT_IDS entries.
+     */
+    private fun pruneSentIds() {
+        try {
+            val allEntries = prefs.all
+            val sentIds = allEntries.keys
+                .filter { it.startsWith("sent_") }
+                .map { it.removePrefix("sent_").toLongOrNull() }
+                .filterNotNull()
+                .sortedDescending()
+
+            if (sentIds.size > MAX_SENT_IDS) {
+                val idsToRemove = sentIds.drop(MAX_SENT_IDS)
+                val editor = prefs.edit()
+                for (id in idsToRemove) {
+                    editor.remove("sent_$id")
+                }
+                editor.apply()
+                android.util.Log.d("SmsForwardService", "Pruned ${idsToRemove.size} old sent_* entries")
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("SmsForwardService", "Error pruning sent IDs", e)
         }
     }
 }

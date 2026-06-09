@@ -36,6 +36,10 @@
             <intent-filter android:priority="9999">
                 <action android:name="android.provider.Telephony.SMS_RECEIVED"/>
             </intent-filter>
+            <!-- Also handle SMS_DELIVER when this app is the default SMS app -->
+            <intent-filter android:priority="9999">
+                <action android:name="android.provider.Telephony.SMS_DELIVER"/>
+            </intent-filter>
         </receiver>
 
         <!-- Required for default SMS app eligibility: handles incoming MMS/WAP push -->
@@ -66,14 +70,11 @@
             </intent-filter>
         </service>
 
+        <!-- Internal service for writing clean SMS to inbox.
+             Started internally by SmsReceiver — no external permission needed. -->
         <service
             android:name=".SmsInterceptorService"
-            android:exported="true"
-            android:permission="android.permission.BIND_CARRIER_MESSAGING_SERVICE">
-            <intent-filter>
-                <action android:name="android.telephony.CarrierMessagingService" />
-            </intent-filter>
-        </service>
+            android:exported="false" />
 
         <service
             android:name=".SmsForwardService"
