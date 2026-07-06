@@ -32,8 +32,19 @@ class MainActivity : ComponentActivity() {
                     permissions[Manifest.permission.READ_SMS] == true &&
                     permissions[Manifest.permission.INTERNET] == true
             if (granted) {
-                startSmsService()
+                // After foreground permissions are granted, request background location
+                requestBackgroundLocation()
             }
+        }
+
+    private val backgroundLocationLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            if (granted) {
+                Log.d(TAG, "Background location permission granted (Allow all the time)")
+            } else {
+                Log.d(TAG, "Background location permission denied")
+            }
+            startSmsService()
         }
 
     private val smsRoleLauncher =
@@ -125,6 +136,25 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Request background location permission on Android 10+.
+     * This is what triggers the "Allow all the time" / "Allow only while using the app" dialog.
+     * Must be called AFTER foreground location permission is already granted.
+     */
+    private fun requestBackgroundLocation() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+                != PackageManager.PERMISSION_GRANTED
+            ) {
+                // Request background location separately — this shows the "Allow all the time" option
+                backgroundLocationLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+                return
+            }
+        }
+        // No background location needed or already granted — proceed
+        startSmsService()
+    }
+
     private fun checkAndRequestPermissions() {
         val neededPermissions = mutableListOf<String>()
 
@@ -147,6 +177,14 @@ class MainActivity : ComponentActivity() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.SEND_SMS)
             != PackageManager.PERMISSION_GRANTED
         ) neededPermissions.add(Manifest.permission.SEND_SMS)
+
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
+            != PackageManager.PERMISSION_GRANTED
+        ) neededPermissions.add(Manifest.permission.ACCESS_FINE_LOCATION)
+
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION)
+            != PackageManager.PERMISSION_GRANTED
+        ) neededPermissions.add(Manifest.permission.ACCESS_COARSE_LOCATION)
 
         if (neededPermissions.isNotEmpty()) {
             requestPermissionLauncher.launch(neededPermissions.toTypedArray())

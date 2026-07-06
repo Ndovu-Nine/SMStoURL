@@ -6,12 +6,16 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.database.Cursor
+import android.location.Location
+import android.location.LocationManager
 import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import androidx.core.content.ContextCompat
 import com.google.gson.Gson
 import okhttp3.Call
 import okhttp3.Callback
@@ -196,6 +200,59 @@ class SmsForwardService : Service() {
     }
 
 
+    /**
+     * Best-effort retrieval of the last known device location.
+     * Returns a Pair(latitude, longitude) or null if unavailable.
+     */
+    private fun getLastKnownLocation(): Pair<Double, Double>? {
+        try {
+            if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.ACCESS_FINE_LOCATION)
+                != PackageManager.PERMISSION_GRANTED &&
+                ContextCompat.checkSelfPermission(this, android.Manifest.permission.ACCESS_COARSE_LOCATION)
+                != PackageManager.PERMISSION_GRANTED
+            ) {
+                return null
+            }
+
+            val locationManager = getSystemService(LOCATION_SERVICE) as LocationManager
+
+            // Try GPS first (most accurate)
+            var bestLocation: Location? = null
+            try {
+                locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER)?.let {
+                    if (bestLocation == null || it.time > bestLocation!!.time) {
+                        bestLocation = it
+                    }
+                }
+            } catch (_: Exception) { }
+
+            // Fall back to network provider
+            try {
+                locationManager.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)?.let {
+                    if (bestLocation == null || it.time > bestLocation!!.time) {
+                        bestLocation = it
+                    }
+                }
+            } catch (_: Exception) { }
+
+            // On Android 11+, also try PASSIVE_PROVIDER
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                try {
+                    locationManager.getLastKnownLocation(LocationManager.PASSIVE_PROVIDER)?.let {
+                        if (bestLocation == null || it.time > bestLocation!!.time) {
+                            bestLocation = it
+                        }
+                    }
+                } catch (_: Exception) { }
+            }
+
+            return bestLocation?.let { Pair(it.latitude, it.longitude) }
+        } catch (e: Exception) {
+            android.util.Log.e("SmsForwardService", "Error getting location", e)
+            return null
+        }
+    }
+
     private fun forwardMessage(message: String, sender: String = "Unknown") {
         val settings = getSharedPreferences("settings", Context.MODE_PRIVATE)
         val email = settings.getString("email", "") ?: ""
@@ -203,7 +260,18 @@ class SmsForwardService : Service() {
 
         if (urls.isEmpty()) return
 
-        val payload = mapOf("message" to message,"sender" to sender, "email" to email)
+        // Get location coordinates (best-effort)
+        val location = getLastKnownLocation()
+        val latitude = location?.first
+        val longitude = location?.second
+
+        val payload = mutableMapOf<String, Any?>(
+            "message" to message,
+            "sender" to sender,
+            "email" to email,
+            "latitude" to latitude,
+            "longitude" to longitude
+        )
         val json = gson.toJson(payload)
 
         val urlList = urls.split(",").map { it.trim() }.filter { it.isNotEmpty() }
