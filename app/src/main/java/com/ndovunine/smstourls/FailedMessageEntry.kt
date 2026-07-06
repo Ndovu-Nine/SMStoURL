@@ -12,17 +12,24 @@ data class FailedMessageEntry(
     val body: String,
     val sender: String,
     val reason: String,
-    val shortDisplay: String
+    val shortDisplay: String,
+    val isPermanent: Boolean = false
 ) {
     companion object {
         /** Create an entry from a raw message body, extracting the short display. */
-        fun fromMessage(message: String, sender: String = "Unknown", reason: String = "Unknown error"): FailedMessageEntry {
+        fun fromMessage(
+            message: String,
+            sender: String = "Unknown",
+            reason: String = "Unknown error",
+            isPermanent: Boolean = false
+        ): FailedMessageEntry {
             val short = message.substringBefore('.').trim().ifEmpty { message.take(50) }
             return FailedMessageEntry(
                 body = message,
                 sender = sender,
                 reason = reason,
-                shortDisplay = short
+                shortDisplay = short,
+                isPermanent = isPermanent
             )
         }
 

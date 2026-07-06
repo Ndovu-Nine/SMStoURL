@@ -44,7 +44,7 @@ class SmsForwardService : Service() {
         const val EXTRA_RETRY_MESSAGE = "retry_message"
         const val EXTRA_RETRY_BODY = "retry_body"
         private const val RETRY_INTERVAL_MS = 1 * 60 * 1000L // 1 minutes
-        private const val MAX_SENT_IDS = 500 // Keep only the last 500 sent IDs
+        private const val MAX_SENT_IDS = 2000 // Keep only the last 500 sent IDs
     }
 
     // TypeToken for deserializing the server PAYLOAD response
@@ -79,6 +79,7 @@ class SmsForwardService : Service() {
 
     private var retryHandler: Handler? = null
     private var retryRunnable: Runnable? = null
+    private var isStopping = false
     private val NOTIF_ID = 1
     private val channelId = "SmsForwarderChannel"
 
@@ -86,21 +87,31 @@ class SmsForwardService : Service() {
         get() = prefs.getInt("forwarded_count", 0)
         set(value) = prefs.edit().putInt("forwarded_count", value).apply()
 
+    private var failedCount: Int
+        get() = prefs.getInt("failed_count", 0)
+        set(value) = prefs.edit().putInt("failed_count", value).apply()
+
 
     private fun updateNotification() {
         val notificationManager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-        val count = forwardedCount
+        val forwarded = forwardedCount
+        val failed = failedCount
+        val contentText = if (failed > 0) {
+            "$forwarded forwarded, $failed failed"
+        } else {
+            "$forwarded SMS forwarded"
+        }
         val notification = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             Notification.Builder(this, channelId)
                 .setContentTitle("SMS to URLs")
-                .setContentText("$count SMS forwarded")
+                .setContentText(contentText)
                 .setSmallIcon(android.R.drawable.ic_dialog_info)
                 .build()
         } else {
             @Suppress("DEPRECATION")
             Notification.Builder(this)
                 .setContentTitle("SMS to URLs")
-                .setContentText("$count SMS forwarded")
+                .setContentText(contentText)
                 .setSmallIcon(android.R.drawable.ic_dialog_info)
                 .setPriority(Notification.PRIORITY_LOW)
                 .build()
@@ -132,7 +143,7 @@ class SmsForwardService : Service() {
                 // is thrown if the background time limit is exhausted.
                 // Gracefully stop instead of crashing.
                 android.util.Log.e("SmsForwardService", "Failed to start foreground service", e)
-                stopSelf()
+                stopServiceSafely()
                 return START_NOT_STICKY
             }
         }
@@ -158,6 +169,13 @@ class SmsForwardService : Service() {
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         super.onTaskRemoved(rootIntent)
+        // Do NOT schedule a restart if the service is stopping — this would
+        // resurrect the service while Android expects it to die, causing
+        // ForegroundServiceDidNotStopInTimeException.
+        if (isStopping) {
+            Log.d("SmsForwardService", "Service is stopping — skipping alarm restart")
+            return
+        }
         // If the user swipes the app away, schedule an alarm to restart the service
         // after a short delay. This keeps SMS forwarding alive even when the app
         // UI is dismissed.
@@ -183,14 +201,38 @@ class SmsForwardService : Service() {
     }
 
     override fun onDestroy() {
-        super.onDestroy()
+        isStopping = true
         // Stop the retry handler to prevent leaks
         retryHandler?.removeCallbacksAndMessages(null)
         retryHandler = null
         retryRunnable = null
+        // Safety net: remove foreground notification to satisfy Android's timeout requirement
+        stopForegroundSafely()
+        super.onDestroy()
     }
 
     private var isForeground = false
+
+    /**
+     * Call stopForeground() then stopSelf() to satisfy Android's requirement that
+     * foreground services remove their notification before stopping.
+     * Sets isStopping flag to prevent retry loop from re-scheduling.
+     */
+    private fun stopServiceSafely() {
+        isStopping = true
+        stopForegroundSafely()
+        stopSelf()
+    }
+
+    /** Remove the foreground notification if currently in foreground. */
+    private fun stopForegroundSafely() {
+        try {
+            if (isForeground) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                isForeground = false
+            }
+        } catch (_: Exception) { }
+    }
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -334,15 +376,16 @@ class SmsForwardService : Service() {
             client.newCall(request).enqueue(object : Callback {
                 override fun onFailure(call: Call, e: IOException) {
                     Log.e("SmsForwardService", "Failed to forward to $url", e)
-                    saveFailedMessage(message, sender, e.message ?: "Network error")
+                    saveFailedMessage(message, sender, e.message ?: "Network error", isPermanent = false)
                 }
 
                 override fun onResponse(call: Call, response: Response) {
                     try {
                         if (!response.isSuccessful) {
                             val reason = extractFailureReason(response)
+                            val permanent = isServerProvidedReason(reason)
                             Log.w("SmsForwardService", "HTTP ${response.code} from $url: $reason")
-                            saveFailedMessage(message, sender, reason)
+                            saveFailedMessage(message, sender, reason, isPermanent = permanent)
                         } else {
                             // Check if the server PAYLOAD indicates failure despite HTTP 200
                             val responseBody = response.body?.string()
@@ -353,7 +396,7 @@ class SmsForwardService : Service() {
                                     if (!success) {
                                         val reason = extractErrorFromPayload(payloadMap)
                                         Log.w("SmsForwardService", "Server reported failure from $url: $reason")
-                                        saveFailedMessage(message, sender, reason)
+                                        saveFailedMessage(message, sender, reason, isPermanent = true)
                                     } else {
                                         forwardedCount += 1
                                         updateNotification()
@@ -430,15 +473,40 @@ class SmsForwardService : Service() {
         return "Server error"
     }
 
+    /**
+     * Returns true if the reason was provided by the server (not a generic
+     * client-side or network error). Server reasons indicate permanent failures
+     * that should NOT be auto-retried.
+     */
+    private fun isServerProvidedReason(reason: String): Boolean {
+        return reason != "Unknown error"
+                && reason != "Server error"
+                && !reason.startsWith("HTTP ")
+                && reason != "Serialization error"
+                && reason != "Network error"
+                && reason != "Response processing error"
+    }
+
     /** Save failed message as structured FailedMessageEntry JSON */
-    private fun saveFailedMessage(message: String, sender: String = "Unknown", reason: String = "Unknown error") {
+    private fun saveFailedMessage(
+        message: String,
+        sender: String = "Unknown",
+        reason: String = "Unknown error",
+        isPermanent: Boolean = false
+    ) {
         try {
-            val entry = FailedMessageEntry.fromMessage(message, sender, reason)
+            val entry = FailedMessageEntry.fromMessage(message, sender, reason, isPermanent)
             val entryJson = gson.toJson(entry)
             val failed = loadFailedMessages().toMutableList()
             if (!failed.contains(entryJson)) {
                 failed.add(entryJson)
                 prefs.edit().putString("failed_messages", gson.toJson(failed)).apply()
+                failedCount = failed.filter { entryStr ->
+                    try {
+                        gson.fromJson(entryStr, FailedMessageEntry::class.java).let { true }
+                    } catch (_: Exception) { true }
+                }.size
+                updateNotification()
                 broadcastFailedUpdated()
             }
         } catch (e: Exception) {
@@ -458,26 +526,36 @@ class SmsForwardService : Service() {
     }
 
     /**
-     * Retry all failed messages.
+     * Retry all non-permanent failed messages.
      * Handles:
-     *  - FailedMessageEntry JSON (current format)
+     *  - FailedMessageEntry JSON (current format) — skips if isPermanent=true
      *  - Legacy map JSON {"message":..., "sender":...} (old format)
      *  - Plain string messages (oldest format)
+     *
+     * Permanent entries (server-provided reasons) are preserved forever
+     * and can only be retried manually by the user.
      */
     private fun retryFailedMessages() {
         val failed = loadFailedMessages().toMutableList()
+        val remaining = mutableListOf<String>()
+
         for (entry in failed) {
             try {
                 // Try parsing as FailedMessageEntry first
                 val failedEntry = gson.fromJson(entry, FailedMessageEntry::class.java)
                 if (failedEntry.body.isNotBlank()) {
+                    if (failedEntry.isPermanent) {
+                        // Server reason — keep forever, only user can retry
+                        remaining.add(entry)
+                        continue
+                    }
                     forwardMessage(failedEntry.body, failedEntry.sender)
                     continue
                 }
             } catch (_: Exception) { }
 
+            // Legacy or plain string — retry normally (not permanent)
             try {
-                // Try legacy map format {"message":..., "sender":...}
                 val map = gson.fromJson(entry, Map::class.java)
                 val msg = map["message"] as? String
                 val sender = map["sender"] as? String ?: "Unknown"
@@ -487,11 +565,14 @@ class SmsForwardService : Service() {
                     forwardMessage(entry)
                 }
             } catch (_: Exception) {
-                // Plain string — oldest format
                 forwardMessage(entry)
             }
         }
-        prefs.edit().putString("failed_messages", "[]").apply()
+
+        // Preserve permanent entries; clear only the retried ones
+        prefs.edit().putString("failed_messages", gson.toJson(remaining)).apply()
+        failedCount = remaining.size
+        updateNotification()
     }
 
     /** Retry loop every 30 minutes using Handler (main thread) instead of daemon timer thread */
@@ -499,14 +580,19 @@ class SmsForwardService : Service() {
         retryHandler = Handler(Looper.getMainLooper())
         retryRunnable = object : Runnable {
             override fun run() {
+                // Bail early if the service is shutting down to avoid keeping
+                // the process alive past Android's foreground service timeout.
+                if (isStopping) return
                 try {
                     retryFailedMessages()
                     syncLastInboxMessages()
                 } catch (e: Exception) {
                     android.util.Log.e("SmsForwardService", "Error in retry loop", e)
                 }
-                // Re-schedule for next interval
-                retryHandler?.postDelayed(this, RETRY_INTERVAL_MS)
+                // Re-schedule for next interval only if still alive
+                if (!isStopping) {
+                    retryHandler?.postDelayed(this, RETRY_INTERVAL_MS)
+                }
             }
         }
         // Run immediately, then every 30 minutes
