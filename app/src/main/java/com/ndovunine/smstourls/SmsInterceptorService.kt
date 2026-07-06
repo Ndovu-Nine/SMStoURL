@@ -35,31 +35,35 @@ class SmsInterceptorService : Service() {
     }
 
     private fun handleIncomingSms(intent: Intent) {
-        val messages = Telephony.Sms.Intents.getMessagesFromIntent(intent)
-        if (messages.isNullOrEmpty()) return
+        try {
+            val messages = Telephony.Sms.Intents.getMessagesFromIntent(intent)
+            if (messages.isNullOrEmpty()) return
 
-        for (sms in messages) {
-            val sender      = sms.originatingAddress ?: "Unknown"
-            val messageBody = sms.messageBody ?: continue
-            val timestamp   = sms.timestampMillis
+            for (sms in messages) {
+                val sender      = sms.originatingAddress ?: "Unknown"
+                val messageBody = sms.messageBody ?: continue
+                val timestamp   = sms.timestampMillis
 
-            if (SpamDetector.isSpam(messageBody)) {
-                val matched = SpamDetector.getMatchedKeywords(messageBody)
-                Log.w(TAG, "SPAM blocked from [$sender]. Keywords: $matched")
-                // Simply do not write to inbox — message ceases to exist
-                continue
+                if (SpamDetector.isSpam(messageBody)) {
+                    val matched = SpamDetector.getMatchedKeywords(messageBody)
+                    Log.w(TAG, "SPAM blocked from [$sender]. Keywords: $matched")
+                    // Simply do not write to inbox — message ceases to exist
+                    continue
+                }
+
+                Log.d(TAG, "Clean SMS from [$sender] — writing to inbox and forwarding")
+
+                // 1. Write to inbox (mandatory when you are the default SMS app)
+                writeToInbox(sender, messageBody, timestamp)
+
+                // 2. Forward to your forwarding service
+                val forwardIntent = Intent(this, SmsForwardService::class.java).apply {
+                    putExtra("sms_message", messageBody)
+                }
+                startService(forwardIntent)
             }
-
-            Log.d(TAG, "Clean SMS from [$sender] — writing to inbox and forwarding")
-
-            // 1. Write to inbox (mandatory when you are the default SMS app)
-            writeToInbox(sender, messageBody, timestamp)
-
-            // 2. Forward to your forwarding service
-            val forwardIntent = Intent(this, SmsForwardService::class.java).apply {
-                putExtra("sms_message", messageBody)
-            }
-            startService(forwardIntent)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in handleIncomingSms", e)
         }
     }
 

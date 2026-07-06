@@ -13,7 +13,14 @@ class SmsReceiver : BroadcastReceiver() {
     private val TAG = "SmsReceiver"
 
     override fun onReceive(context: Context, intent: Intent) {
+        try {
+            handleReceive(context, intent)
+        } catch (e: Exception) {
+            Log.e(TAG, "Unhandled error in SmsReceiver.onReceive", e)
+        }
+    }
 
+    private fun handleReceive(context: Context, intent: Intent) {
         // Handle the two different SMS intents:
         //
         // SMS_DELIVER_ACTION  → fired ONLY at the default SMS app. Use this to
@@ -46,25 +53,29 @@ class SmsReceiver : BroadcastReceiver() {
      * Clean → pass to SmsInterceptorService to write to inbox + forward.
      */
     private fun handleSmsDeliver(context: Context, intent: Intent) {
-        val messages = Telephony.Sms.Intents.getMessagesFromIntent(intent)
-        if (messages.isNullOrEmpty()) return
+        try {
+            val messages = Telephony.Sms.Intents.getMessagesFromIntent(intent)
+            if (messages.isNullOrEmpty()) return
 
-        for (sms in messages) {
-            val sender      = sms.originatingAddress ?: "Unknown"
-            val messageBody = sms.messageBody ?: continue
+            for (sms in messages) {
+                val sender      = sms.originatingAddress ?: "Unknown"
+                val messageBody = sms.messageBody ?: continue
 
-            if (SpamDetector.isSpam(messageBody)) {
-                Log.w(TAG, "SPAM silently discarded from [$sender] (default app mode)")
-                // Do nothing — message is gone, no inbox write, no notification
-                continue
+                if (SpamDetector.isSpam(messageBody)) {
+                    Log.w(TAG, "SPAM silently discarded from [$sender] (default app mode)")
+                    // Do nothing — message is gone, no inbox write, no notification
+                    continue
+                }
+
+                val serviceIntent = Intent(context, SmsInterceptorService::class.java).apply {
+                    action = intent.action
+                    putExtras(intent)
+                }
+                context.startService(serviceIntent)
+                break // service handles all PDUs in the intent at once
             }
-
-            val serviceIntent = Intent(context, SmsInterceptorService::class.java).apply {
-                action = intent.action
-                putExtras(intent)
-            }
-            context.startService(serviceIntent)
-            break // service handles all PDUs in the intent at once
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in handleSmsDeliver", e)
         }
     }
 
@@ -73,18 +84,21 @@ class SmsReceiver : BroadcastReceiver() {
      * Uses abortBroadcast() as best-effort — may not work on all OEMs/Android 10+.
      */
     private fun handleSmsReceived(intent: Intent) {
-        val messages = Telephony.Sms.Intents.getMessagesFromIntent(intent) ?: return
+        try {
+            val messages = Telephony.Sms.Intents.getMessagesFromIntent(intent) ?: return
 
-        for (sms in messages) {
-            val sender      = sms.originatingAddress ?: "Unknown"
-            val messageBody = sms.messageBody ?: continue
+            for (sms in messages) {
+                val sender      = sms.originatingAddress ?: "Unknown"
+                val messageBody = sms.messageBody ?: continue
 
-            if (SpamDetector.isSpam(messageBody)) {
-                Log.w(TAG, "SPAM — attempting abortBroadcast() from [$sender]")
-                abortBroadcast()
-                return
+                if (SpamDetector.isSpam(messageBody)) {
+                    Log.w(TAG, "SPAM — attempting abortBroadcast() from [$sender]")
+                    abortBroadcast()
+                    return
+                }
             }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in handleSmsReceived", e)
         }
-
     }
 }

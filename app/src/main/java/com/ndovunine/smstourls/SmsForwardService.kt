@@ -1,8 +1,10 @@
 package com.ndovunine.smstourls
 
+import android.app.AlarmManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -15,8 +17,11 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.SystemClock
+import android.util.Log
 import androidx.core.content.ContextCompat
 import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
@@ -37,9 +42,14 @@ class SmsForwardService : Service() {
         const val ACTION_RETRY_MESSAGE = "com.ndovunine.smstourls.RETRY_MESSAGE"
         const val ACTION_FAILED_UPDATED = "com.ndovunine.smstourls.FAILED_UPDATED"
         const val EXTRA_RETRY_MESSAGE = "retry_message"
+        const val EXTRA_RETRY_BODY = "retry_body"
         private const val RETRY_INTERVAL_MS = 1 * 60 * 1000L // 1 minutes
         private const val MAX_SENT_IDS = 500 // Keep only the last 500 sent IDs
     }
+
+    // TypeToken for deserializing the server PAYLOAD response
+    private val payloadType = object : TypeToken<Map<String, Any?>>() {}.type
+    private val messagesListType = object : TypeToken<List<Map<String, Any?>>>() {}.type
 
     private fun getUnsafeOkHttpClient(): OkHttpClient {
         return try {
@@ -146,6 +156,32 @@ class SmsForwardService : Service() {
         return START_STICKY
     }
 
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        // If the user swipes the app away, schedule an alarm to restart the service
+        // after a short delay. This keeps SMS forwarding alive even when the app
+        // UI is dismissed.
+        try {
+            val restartIntent = Intent(this, SmsForwardService::class.java)
+            val pendingIntent = PendingIntent.getService(
+                this,
+                0,
+                restartIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+            val triggerTime = SystemClock.elapsedRealtime() + 30_000 // 30 seconds
+            alarmManager.setExactAndAllowWhileIdle(
+                AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                triggerTime,
+                pendingIntent
+            )
+            Log.d("SmsForwardService", "Scheduled restart via AlarmManager after task removal")
+        } catch (e: Exception) {
+            Log.e("SmsForwardService", "Failed to schedule restart on task removal", e)
+        }
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         // Stop the retry handler to prevent leaks
@@ -187,9 +223,16 @@ class SmsForwardService : Service() {
         isForeground = true
     }
 
-    private fun removeFailedMessage(message: String) {
+    private fun removeFailedMessage(displayText: String) {
         val failed = loadFailedMessages().toMutableList()
-        failed.remove(message)
+        failed.removeAll { entry ->
+            try {
+                val failedEntry = gson.fromJson(entry, FailedMessageEntry::class.java)
+                FailedMessageEntry.displayText(failedEntry) == displayText
+            } catch (_: Exception) {
+                entry == displayText  // fallback for legacy plain strings
+            }
+        }
         prefs.edit().putString("failed_messages", gson.toJson(failed)).apply()
         broadcastFailedUpdated()
     }
@@ -272,83 +315,179 @@ class SmsForwardService : Service() {
             "latitude" to latitude,
             "longitude" to longitude
         )
-        val json = gson.toJson(payload)
+        val json: String
+        try {
+            json = gson.toJson(payload)
+        } catch (e: Exception) {
+            Log.e("SmsForwardService", "Failed to serialize payload to JSON", e)
+            saveFailedMessage(message, sender, "Serialization error: ${e.message}")
+            return
+        }
 
         val urlList = urls.split(",").map { it.trim() }.filter { it.isNotEmpty() }
 
         for (url in urlList) {
-            // Create a fresh RequestBody for each URL to avoid "closed" IllegalStateException
+            @Suppress("DEPRECATION")
             val requestBody = RequestBody.create("application/json; charset=utf-8".toMediaType(), json)
             val request = Request.Builder().url(url).post(requestBody).build()
 
             client.newCall(request).enqueue(object : Callback {
                 override fun onFailure(call: Call, e: IOException) {
-                    android.util.Log.e("SmsForwardService", "Failed to forward to $url", e)
-                    saveFailedMessage(message, sender) // store for retry
+                    Log.e("SmsForwardService", "Failed to forward to $url", e)
+                    saveFailedMessage(message, sender, e.message ?: "Network error")
                 }
 
                 override fun onResponse(call: Call, response: Response) {
-                    if (!response.isSuccessful) {
-                        android.util.Log.w("SmsForwardService", "HTTP ${response.code} from $url")
-                        saveFailedMessage(message, sender)
+                    try {
+                        if (!response.isSuccessful) {
+                            val reason = extractFailureReason(response)
+                            Log.w("SmsForwardService", "HTTP ${response.code} from $url: $reason")
+                            saveFailedMessage(message, sender, reason)
+                        } else {
+                            // Check if the server PAYLOAD indicates failure despite HTTP 200
+                            val responseBody = response.body?.string()
+                            if (responseBody != null) {
+                                try {
+                                    val payloadMap = gson.fromJson<Map<String, Any?>>(responseBody, payloadType)
+                                    val success = payloadMap["success"] as? Boolean ?: true
+                                    if (!success) {
+                                        val reason = extractErrorFromPayload(payloadMap)
+                                        Log.w("SmsForwardService", "Server reported failure from $url: $reason")
+                                        saveFailedMessage(message, sender, reason)
+                                    } else {
+                                        forwardedCount += 1
+                                        updateNotification()
+                                    }
+                                } catch (_: Exception) {
+                                    // Can't parse JSON — assume success since HTTP was OK
+                                    forwardedCount += 1
+                                    updateNotification()
+                                }
+                            } else {
+                                forwardedCount += 1
+                                updateNotification()
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.e("SmsForwardService", "Error processing response from $url", e)
+                        saveFailedMessage(message, sender, "Response processing error: ${e.message}")
+                    } finally {
+                        try {
+                            response.close()
+                        } catch (_: Exception) { }
                     }
-                    else{
-                        forwardedCount += 1   // count up
-                        updateNotification()
-                    }
-                    response.close()
                 }
             })
         }
     }
 
-    /** Save failed message into SharedPreferences */
-    private fun saveFailedMessage(message: String) {
-        val failed = loadFailedMessages().toMutableList()
-        if (!failed.contains(message)) {
-            failed.add(message)
-            prefs.edit().putString("failed_messages", gson.toJson(failed)).apply()
-            broadcastFailedUpdated()
-        }
-    }
-    private fun saveFailedMessage(message: String, sender: String) {
-        val failed = loadFailedMessages().toMutableList()
-        val entry = gson.toJson(mapOf("message" to message, "sender" to sender))
-        if (!failed.contains(entry)) {
-            failed.add(entry)
-            prefs.edit().putString("failed_messages", gson.toJson(failed)).apply()
+    /**
+     * Extract a human-readable failure reason from an HTTP error response.
+     * Attempts to parse the body as a server PAYLOAD first, falls back to HTTP status.
+     */
+    private fun extractFailureReason(response: Response): String {
+        return try {
+            val body = response.body?.string()
+            if (body != null) {
+                val payloadMap = gson.fromJson<Map<String, Any?>>(body, payloadType)
+                val reason = extractErrorFromPayload(payloadMap)
+                if (reason != "Server error") reason else "HTTP ${response.code}"
+            } else {
+                "HTTP ${response.code}"
+            }
+        } catch (_: Exception) {
+            "HTTP ${response.code}"
         }
     }
 
+    /**
+     * Extract error details from a PAYLOAD map:
+     *   1. Check root "error" field
+     *   2. Check first message's sent_result_message / delivery_result_message
+     *   3. Fall back to "Server error"
+     */
+    private fun extractErrorFromPayload(payload: Map<String, Any?>): String {
+        // Try root-level error field
+        val error = payload["error"] as? String
+        if (!error.isNullOrBlank()) return error
 
-    /** Load failed list */
+        // Try messages array for per-message failure details
+        val messagesRaw = payload["messages"]
+        if (messagesRaw is List<*>) {
+            val messagesJson = gson.toJson(messagesRaw)
+            try {
+                val messages: List<Map<String, Any?>> = gson.fromJson(messagesJson, messagesListType)
+                for (msg in messages) {
+                    val sentResultMsg = msg["sent_result_message"] as? String
+                    if (!sentResultMsg.isNullOrBlank()) return sentResultMsg
+
+                    val deliveryResultMsg = msg["delivery_result_message"] as? String
+                    if (!deliveryResultMsg.isNullOrBlank()) return deliveryResultMsg
+                }
+            } catch (_: Exception) { }
+        }
+
+        return "Server error"
+    }
+
+    /** Save failed message as structured FailedMessageEntry JSON */
+    private fun saveFailedMessage(message: String, sender: String = "Unknown", reason: String = "Unknown error") {
+        try {
+            val entry = FailedMessageEntry.fromMessage(message, sender, reason)
+            val entryJson = gson.toJson(entry)
+            val failed = loadFailedMessages().toMutableList()
+            if (!failed.contains(entryJson)) {
+                failed.add(entryJson)
+                prefs.edit().putString("failed_messages", gson.toJson(failed)).apply()
+                broadcastFailedUpdated()
+            }
+        } catch (e: Exception) {
+            Log.e("SmsForwardService", "Error saving failed message", e)
+        }
+    }
+
+    /** Load failed list (JSON strings of FailedMessageEntry) */
     private fun loadFailedMessages(): List<String> {
-        val json = prefs.getString("failed_messages", "[]")
-        return gson.fromJson(json, Array<String>::class.java).toList()
+        return try {
+            val json = prefs.getString("failed_messages", "[]") ?: "[]"
+            gson.fromJson(json, Array<String>::class.java).toList()
+        } catch (e: Exception) {
+            Log.e("SmsForwardService", "Error loading failed messages", e)
+            emptyList()
+        }
     }
 
     /**
      * Retry all failed messages.
-     * Handles both:
-     *  - Plain string messages (saved by saveFailedMessage(message))
-     *  - JSON object entries (saved by saveFailedMessage(message, sender))
+     * Handles:
+     *  - FailedMessageEntry JSON (current format)
+     *  - Legacy map JSON {"message":..., "sender":...} (old format)
+     *  - Plain string messages (oldest format)
      */
     private fun retryFailedMessages() {
         val failed = loadFailedMessages().toMutableList()
         for (entry in failed) {
             try {
-                // Try parsing as JSON object first (sender-aware format)
+                // Try parsing as FailedMessageEntry first
+                val failedEntry = gson.fromJson(entry, FailedMessageEntry::class.java)
+                if (failedEntry.body.isNotBlank()) {
+                    forwardMessage(failedEntry.body, failedEntry.sender)
+                    continue
+                }
+            } catch (_: Exception) { }
+
+            try {
+                // Try legacy map format {"message":..., "sender":...}
                 val map = gson.fromJson(entry, Map::class.java)
                 val msg = map["message"] as? String
                 val sender = map["sender"] as? String ?: "Unknown"
                 if (msg != null) {
                     forwardMessage(msg, sender)
                 } else {
-                    // If "message" key is missing, treat the whole entry as the message
                     forwardMessage(entry)
                 }
-            } catch (e: Exception) {
-                // Not a JSON object — treat as plain text message
+            } catch (_: Exception) {
+                // Plain string — oldest format
                 forwardMessage(entry)
             }
         }
