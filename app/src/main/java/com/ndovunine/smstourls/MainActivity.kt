@@ -157,6 +157,7 @@ class MainActivity : ComponentActivity() {
                     val view = convertView ?: layoutInflater.inflate(R.layout.item_failed_message, parent, false)
                     val tvMessage = view.findViewById<android.widget.TextView>(R.id.tvMessage)
                     val btnRetry = view.findViewById<Button>(R.id.btnRetry)
+                    val btnRemove = view.findViewById<Button>(R.id.btnRemove)
                     val displayText = displayTexts[position]
                     tvMessage.text = displayText
                     btnRetry.setOnClickListener {
@@ -165,6 +166,23 @@ class MainActivity : ComponentActivity() {
                             putExtra(SmsForwardService.EXTRA_RETRY_MESSAGE, displayText)
                         }
                         ContextCompat.startForegroundService(this@MainActivity, intent)
+                        displayTexts.removeAt(position)
+                        notifyDataSetChanged()
+                    }
+                    btnRemove.setOnClickListener {
+                        // Remove from SharedPreferences and refresh list
+                        val prefs = getSharedPreferences("sms_forwarder", Context.MODE_PRIVATE)
+                        val json = prefs.getString("failed_messages", "[]") ?: "[]"
+                        val rawEntries = Gson().fromJson(json, Array<String>::class.java).toMutableList()
+                        rawEntries.removeAll { entry ->
+                            try {
+                                val failedEntry = Gson().fromJson(entry, FailedMessageEntry::class.java)
+                                FailedMessageEntry.displayText(failedEntry) == displayText
+                            } catch (_: Exception) {
+                                entry == displayText
+                            }
+                        }
+                        prefs.edit().putString("failed_messages", Gson().toJson(rawEntries)).apply()
                         displayTexts.removeAt(position)
                         notifyDataSetChanged()
                     }
